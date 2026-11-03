@@ -15,7 +15,7 @@
 
 """bzlmod extensions for third-party dependencies."""
 
-load("//third_party:java_repos.bzl", java_external_repositories = "repo")
+load("//third_party:java_repos.bzl", java_bzlmod_repositories = "bzlmod_repo", java_external_repositories = "repo")
 load("//third_party:models_repos.bzl", "models_repositories")
 load("//third_party/arm_neon_2_x86_sse:workspace.bzl", arm_neon_2_x86_sse = "repo")
 load("//third_party/coremltools:workspace.bzl", coremltools = "repo")
@@ -62,6 +62,7 @@ def _third_party_ext_impl(mctx):  # @unused
     googleapis()
     hexagon_nn()
     icu()
+    java_bzlmod_repositories()
     java_external_repositories()
     jpeg()
     jpegxl()

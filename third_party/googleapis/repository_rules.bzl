@@ -45,3 +45,7 @@ def config_googleapis():
             ],
         },
     )
+
+googleapis_ext = module_extension(
+    implementation = lambda ctx: config_googleapis(),
+)
