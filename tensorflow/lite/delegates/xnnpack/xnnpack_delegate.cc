@@ -638,6 +638,8 @@ class Subgraph;
 
 class Delegate {
   friend class Subgraph;
+  friend TfLiteStatus DelegatePrepare(TfLiteContext* context,
+                                      TfLiteDelegate* delegate);
 
  public:
   explicit Delegate(const TfLiteXNNPackDelegateOptions* options_ptr,
@@ -1491,8 +1493,11 @@ class Subgraph {
     }
     flags |= delegate.runtime_flags();
 
-    if (delegate.weight_cache_provider_->IsActive() &&
-        delegate.weight_cache_provider_->CanStartBuildStep()) {
+    const bool manage_build_step =
+        delegate.weight_cache_provider_->IsActive() &&
+        delegate.weight_cache_provider_->CanStartBuildStep() &&
+        !delegate.weight_cache_provider_->IsBuilding();
+    if (manage_build_step) {
       if (!delegate.weight_cache_provider_->StartBuildStep()) {
         TF_LITE_KERNEL_LOG(
             context, "XNNPack delegate failed to start cache build step.");
@@ -1505,8 +1510,7 @@ class Subgraph {
           subgraph.get(), delegate.weights_cache(), delegate.workspace(),
           delegate.threadpool(), flags, &runtime_ptr);
     }
-    if (delegate.weight_cache_provider_->IsActive() &&
-        delegate.weight_cache_provider_->CanStartBuildStep()) {
+    if (manage_build_step) {
       if (!delegate.weight_cache_provider_->StopBuildStep()) {
         if (runtime_ptr != nullptr) {
           std::lock_guard<std::mutex> lock(*delegate.workspace_mutex_);
@@ -7804,25 +7808,41 @@ const TfLiteRegistration kSubgraphRegistration = {
 };
 
 TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
+  auto& xnnpack_delegate =
+      *static_cast<::tflite::xnnpack::Delegate*>(delegate->data_);
   std::unique_ptr<TfLiteIntArray, void (*)(TfLiteIntArray*)> moe_ops_to_replace(
       nullptr, TfLiteIntArrayFree);
   TfLiteIntArray* moe_ops_to_replace_raw = nullptr;
-  TfLiteIntArray* ops_to_replace =
-      static_cast<::tflite::xnnpack::Delegate*>(delegate->data_)
-          ->PrepareOpsToDelegate(context, &moe_ops_to_replace_raw);
+  std::unique_ptr<TfLiteIntArray, void (*)(TfLiteIntArray*)> ops_to_replace(
+      xnnpack_delegate.PrepareOpsToDelegate(context, &moe_ops_to_replace_raw),
+      TfLiteIntArrayFree);
   moe_ops_to_replace.reset(moe_ops_to_replace_raw);
   if (ops_to_replace == nullptr) {
     return kTfLiteError;
   }
 
-  TfLiteStatus status = kTfLiteOk;
   if (ops_to_replace->size != 0) {
-    status = context->ReplaceNodeSubsetsWithDelegateKernels(
-        context, kSubgraphRegistration, ops_to_replace, delegate);
-  }
-  TfLiteIntArrayFree(ops_to_replace);
-  if (status != kTfLiteOk) {
-    return status;
+    const bool manage_build_step =
+        xnnpack_delegate.weight_cache_provider_->IsActive() &&
+        xnnpack_delegate.weight_cache_provider_->CanStartBuildStep() &&
+        !xnnpack_delegate.weight_cache_provider_->IsBuilding();
+    if (manage_build_step &&
+        !xnnpack_delegate.weight_cache_provider_->StartBuildStep()) {
+      TF_LITE_KERNEL_LOG(context,
+                         "XNNPack delegate failed to start cache build step.");
+      return kTfLiteError;
+    }
+    const TfLiteStatus status = context->ReplaceNodeSubsetsWithDelegateKernels(
+        context, kSubgraphRegistration, ops_to_replace.get(), delegate);
+    if (manage_build_step &&
+        !xnnpack_delegate.weight_cache_provider_->StopBuildStep()) {
+      TF_LITE_KERNEL_LOG(context,
+                         "XNNPack delegate failed to stop cache build step.");
+      return kTfLiteError;
+    }
+    if (status != kTfLiteOk) {
+      return status;
+    }
   }
 
   if (moe_ops_to_replace != nullptr) {
@@ -7830,15 +7850,15 @@ TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
       TfLiteIntArray* singleton_moe_op = TfLiteIntArrayCreate(1);
       singleton_moe_op->size = 1;
       singleton_moe_op->data[0] = moe_ops_to_replace->data[i];
-      status = context->ReplaceNodeSubsetsWithDelegateKernels(
+      TfLiteStatus status = context->ReplaceNodeSubsetsWithDelegateKernels(
           context, kSubgraphRegistration, singleton_moe_op, delegate);
       TfLiteIntArrayFree(singleton_moe_op);
       if (status != kTfLiteOk) {
-        break;
+        return status;
       }
     }
   }
-  return status;
+  return kTfLiteOk;
 }
 
 }  // namespace
